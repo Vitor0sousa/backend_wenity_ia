@@ -111,7 +111,7 @@ app.post('/api/login', async (req, res) => {
 app.post('/api/chat', async (req, res) => {
     const { message } = req.body;
 
-    const n8nWebhookUrl = 'https://v0sousa.app.n8n.cloud/webhook-test/189d6f04-7ace-4770-92c0-ed1ab8559e56';
+    const n8nWebhookUrl = 'https://vitor9sousa.app.n8n.cloud/webhook-test/189d6f04-7ace-4770-92c0-ed1ab8559e56';
 
     if (!message) {
         return res.status(400).json({ message: 'Mensagem não pode ser vazia.' });
