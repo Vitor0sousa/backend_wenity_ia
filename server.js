@@ -24,6 +24,33 @@ const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 
+function generateTokens(user) {
+    const accessTokenPayload = {
+        user: {
+            id: user.id,
+            email: user.email
+        }
+    };
+    
+    // Access token com duração curta (1 hora)
+    const accessToken = jwt.sign(
+        accessTokenPayload, 
+        process.env.JWT_SECRET, 
+        { expiresIn: '1h' }
+    );
+    
+    // Refresh token com duração longa (7 dias)
+    const refreshToken = jwt.sign(
+        accessTokenPayload, 
+        process.env.JWT_SECRET, 
+        { expiresIn: '7d' }
+    );
+    
+    return { accessToken, refreshToken };
+}
+
+
+
 app.use((req, res, next) => {
   console.log('--- NOVA REQUISIÇÃO ---');
   console.log('Rota:', req.method, req.originalUrl);
@@ -98,33 +125,49 @@ app.post('/api/register', async (req, res) => {
 // Rota de Login (seu código original, modificado para usar a nova JWT_SECRET)
 app.post('/api/login', async (req, res) => {
     const { email, password } = req.body;
+    
     if (!email || !password) {
         return res.status(400).json({ message: 'Email e senha são obrigatórios.' });
     }
+    
     let conn;
     try {
         conn = await pool.getConnection();
         const users = await conn.query("SELECT * FROM users WHERE email = ?", [email]);
+        
         if (users.length === 0) {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
+        
         const user = users[0];
-        const isMatch = await bcrypt.compare(password, user.password); // Corrigido para user.password
+        const isMatch = await bcrypt.compare(password, user.password);
+        
         if (!isMatch) {
             return res.status(401).json({ message: 'Credenciais inválidas.' });
         }
-        const payload = {
+        
+        // Gera ambos os tokens
+        const { accessToken, refreshToken } = generateTokens(user);
+        
+        // Salva o refresh token no banco (recomendado para poder revogar)
+        await conn.query(
+            "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))",
+            [user.id, refreshToken]
+        );
+        
+        // Retorna ambos os tokens e dados do usuário
+        res.json({ 
+            token: accessToken,
+            refreshToken: refreshToken,
             user: {
                 id: user.id,
+                name: user.name,
                 email: user.email
             }
-        };
-        jwt.sign(payload, JWT_SECRET, { expiresIn: '1h' }, (err, token) => {
-            if (err) throw err;
-            res.json({ token });
         });
+        
     } catch (error) {
-        console.error(error);
+        console.error('Erro no login:', error);
         res.status(500).json({ message: 'Erro no servidor.' });
     } finally {
         if (conn) conn.release();
@@ -281,6 +324,102 @@ app.post('/api/analyze-resume', auth, upload.single('resume'), async (req, res) 
     } catch (error) {
         console.error("Erro ao analisar o currículo:", error);
         res.status(500).json({ error: 'Ocorreu um erro ao processar o arquivo PDF.' });
+    }
+});
+// Rota para renovar o token usando o refresh token
+
+app.post('/api/refresh-token', async (req, res) => {
+    const { refreshToken } = req.body;
+    
+    if (!refreshToken) {
+        return res.status(401).json({ message: 'Refresh token não fornecido.' });
+    }
+    
+    let conn;
+    try {
+        // Verifica se o token é válido
+        const decoded = jwt.verify(refreshToken, process.env.JWT_SECRET);
+        
+        conn = await pool.getConnection();
+        
+        // Verifica se o refresh token existe no banco e não expirou
+        const tokens = await conn.query(
+            "SELECT * FROM refresh_tokens WHERE token = ? AND user_id = ? AND expires_at > NOW() AND revoked = 0",
+            [refreshToken, decoded.user.id]
+        );
+        
+        if (tokens.length === 0) {
+            return res.status(401).json({ message: 'Refresh token inválido ou expirado.' });
+        }
+        
+        // Busca dados atualizados do usuário
+        const users = await conn.query("SELECT * FROM users WHERE id = ?", [decoded.user.id]);
+        
+        if (users.length === 0) {
+            return res.status(401).json({ message: 'Usuário não encontrado.' });
+        }
+        
+        const user = users[0];
+        
+        // Gera novos tokens
+        const { accessToken, refreshToken: newRefreshToken } = generateTokens(user);
+        
+        // Revoga o refresh token antigo
+        await conn.query(
+            "UPDATE refresh_tokens SET revoked = 1 WHERE token = ?",
+            [refreshToken]
+        );
+        
+        // Salva o novo refresh token
+        await conn.query(
+            "INSERT INTO refresh_tokens (user_id, token, expires_at) VALUES (?, ?, DATE_ADD(NOW(), INTERVAL 7 DAY))",
+            [user.id, newRefreshToken]
+        );
+        
+        res.json({ 
+            token: accessToken,
+            refreshToken: newRefreshToken 
+        });
+        
+    } catch (error) {
+        if (error.name === 'TokenExpiredError' || error.name === 'JsonWebTokenError') {
+            return res.status(401).json({ message: 'Refresh token inválido.' });
+        }
+        console.error('Erro ao renovar token:', error);
+        res.status(500).json({ message: 'Erro no servidor.' });
+    } finally {
+        if (conn) conn.release();
+    }
+});
+
+app.post('/api/logout', auth, async (req, res) => {
+    const { refreshToken } = req.body;
+    let conn;
+    
+    try {
+        conn = await pool.getConnection();
+        
+        if (refreshToken) {
+            // Revoga o refresh token específico
+            await conn.query(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE token = ? AND user_id = ?",
+                [refreshToken, req.user.id]
+            );
+        } else {
+            // Revoga todos os refresh tokens do usuário
+            await conn.query(
+                "UPDATE refresh_tokens SET revoked = 1 WHERE user_id = ?",
+                [req.user.id]
+            );
+        }
+        
+        res.json({ message: 'Logout realizado com sucesso.' });
+        
+    } catch (error) {
+        console.error('Erro no logout:', error);
+        res.status(500).json({ message: 'Erro ao fazer logout.' });
+    } finally {
+        if (conn) conn.release();
     }
 });
 
