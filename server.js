@@ -50,7 +50,7 @@ const resetTokens = new Map();
 let model;
 try {
     const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-    model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // [cite: 26]
+    model = genAI.getGenerativeModel({ model: "gemini-2.5-flash-lite" }); // [cite: 26]
     console.log("Modelo do Gemini inicializado com sucesso.");
 } catch (error) {
     console.error("ERRO ao inicializar o modelo do Gemini:", error); // [cite: 27]
